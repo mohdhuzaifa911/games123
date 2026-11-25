@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Dodge 3D</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #090910;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffcc;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(0, 255, 204, 0.7);
+            z-index: 10;
+        }
+        #game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: white;
+            background: rgba(15, 15, 25, 0.9);
+            padding: 40px;
+            border: 2px solid #ff0055;
+            border-radius: 12px;
+            box-shadow: 0 0 30px rgba(255, 0, 85, 0.5);
+            display: none;
+            z-index: 20;
+        }
+        #game-over h1 {
+            margin: 0 0 10px 0;
+            color: #ff0055;
+            font-size: 42px;
+            letter-spacing: 2px;
+        }
+        #game-over p {
+            font-size: 20px;
+            margin-bottom: 25px;
+        }
+        button {
+            background: #00ffcc;
+            color: #090910;
+            border: none;
+            padding: 12px 28px;
+            font-size: 18px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+        button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 15px #00ffcc;
+        }
+    </style>
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="ui">Score: <span id="score">0</span></div>
+
+    <div id="game-over">
+        <h1>GAME OVER</h1>
+        <p>Final Score: <span id="final-score">0</span></p>
+        <button onclick="resetGame()">Play Again</button>
+    </div>
+
+    <script>
+        // --- 1. SCENE & CAMERA SETUP ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x090910, 0.035); // Adds depth fade in the distance
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 4, 8);
+        camera.lookAt(0, 0, -5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x090910);
+        document.body.appendChild(renderer.domElement);
+
+        // --- 2. LIGHTING ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+
+        // --- 3. GAME OBJECTS ---
+        // Moving Neon Grid Floor
+        const gridHelper = new THREE.GridHelper(40, 40, 0x00ffcc, 0x222244);
+        gridHelper.position.y = -0.5;
+        scene.add(gridHelper);
+
+        // Player Cube
+        const playerGeo = new THREE.BoxGeometry(1, 1, 1);
+        const playerMat = new THREE.MeshStandardMaterial({ 
+            color: 0x00ffcc, 
+            emissive: 0x008866,
+            roughness: 0.2 
+        });
+        const player = new THREE.Mesh(playerGeo, playerMat);
+        scene.add(player);
+
+        // --- 4. GAME STATE & CONTROLS ---
+        let obstacles = [];
+        let score = 0;
+        let baseSpeed = 0.25;
+        let isGameOver = false;
+        let spawnTimer = 0;
+        const laneLimit = 5.5; // Track boundaries
+
+        const keys = { left: false, right: false };
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = true;
+            if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = true;
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
+            if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 5. OBSTACLE GENERATION ---
+        const obsGeo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
+        const obsMat = new THREE.MeshStandardMaterial({ 
+            color: 0xff0055, 
+            emissive: 0x660022,
+            roughness: 0.3 
+        });
+
+        function spawnObstacle() {
+            const obstacle = new THREE.Mesh(obsGeo, obsMat);
+            // Random X position within track bounds
+            obstacle.position.x = (Math.random() * 2 - 1) * laneLimit;
+            obstacle.position.y = 0.2;
+            obstacle.position.z = -45; // Spawn far in the fog
+            scene.add(obstacle);
+            obstacles.push(obstacle);
+        }
+
+        // --- 6. COLLISION DETECTION ---
+        const playerBox = new THREE.Box3();
+        const obsBox = new THREE.Box3();
+
+        function checkCollision(obstacle) {
+            playerBox.setFromObject(player);
+            obsBox.setFromObject(obstacle);
+            // Shrink bounding boxes slightly for fairer gameplay
+            playerBox.expandByScalar(-0.1);
+            obsBox.expandByScalar(-0.1);
+            return playerBox.intersectsBox(obsBox);
+        }
+
+        // --- 7. MAIN GAME LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isGameOver) return;
+
+            // Increase difficulty gradually
+            const currentSpeed = baseSpeed + (score * 0.0002);
+
+            // Player Movement & Tilt Effect
+            const moveSpeed = 0.16;
+            if (keys.left && player.position.x > -laneLimit) {
+                player.position.x -= moveSpeed;
+                player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, 0.25, 0.15);
+            } else if (keys.right && player.position.x < laneLimit) {
+                player.position.x += moveSpeed;
+                player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, -0.25, 0.15);
+            } else {
+                player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, 0, 0.15);
+            }
+
+            // Animate floor grid to simulate forward speed
+            gridHelper.position.z += currentSpeed;
+            if (gridHelper.position.z >= 1) {
+                gridHelper.position.z = 0;
+            }
+
+            // Spawn new obstacles
+            spawnTimer++;
+            const spawnRate = Math.max(18, Math.floor(45 - score * 0.02));
+            if (spawnTimer > spawnRate) {
+                spawnObstacle();
+                spawnTimer = 0;
+            }
+
+            // Update obstacles
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                const obs = obstacles[i];
+                obs.position.z += currentSpeed;
+                obs.rotation.x += 0.03;
+                obs.rotation.y += 0.03;
+
+                // Check collision
+                if (checkCollision(obs)) {
+                    endGame();
+                }
+
+                // Remove obstacles that passed the camera
+                if (obs.position.z > 10) {
+                    scene.remove(obs);
+                    obstacles.splice(i, 1);
+                    score += 10;
+                    document.getElementById('score').innerText = score;
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 8. GAME OVER & RESET ---
+        function endGame() {
+            isGameOver = true;
+            document.getElementById('final-score').innerText = score;
+            document.getElementById('game-over').style.display = 'block';
+        }
+
+        function resetGame() {
+            // Clear existing obstacles
+            obstacles.forEach(obs => scene.remove(obs));
+            obstacles = [];
+            
+            // Reset stats & position
+            score = 0;
+            spawnTimer = 0;
+            player.position.x = 0;
+            player.rotation.z = 0;
+            document.getElementById('score').innerText = '0';
+            document.getElementById('game-over').style.display = 'none';
+            isGameOver = false;
+        }
+
+        // Start game
+        animate();
+    </script>
+</body>
+</html>
